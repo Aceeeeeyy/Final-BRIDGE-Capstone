@@ -1,0 +1,23 @@
+<!--
+  BRIDGE — "login code" email.
+
+  WHERE TO PASTE THIS (Supabase Dashboard):
+    Authentication → Emails → Templates → "Magic link or OTP"
+  Subject:  Your BRIDGE login code
+
+  Use ONLY {{ .Token }} (the 6-digit code). Do not add {{ .ConfirmationURL }}:
+  BRIDGE logs in by typing the code, not by clicking a link.
+
+  Optional (Authentication → Sign In / Providers → Email): set "Email OTP
+  Expiration" to 600 seconds so the code lives 10 minutes, matching the
+  10-minute login window enforced by the backend.
+-->
+<h2>Confirm your login to BRIDGE</h2>
+
+<p>You are trying to log in to BRIDGE with {{ .Email }}. Enter this 6-digit code in BRIDGE to finish logging in:</p>
+
+<p style="font-size: 32px; font-weight: 700; letter-spacing: 8px; margin: 24px 0; color: #053225;">
+  {{ .Token }}
+</p>
+
+<p>This code expires in a few minutes. If you didn't try to log in, you can safely ignore this email and consider resetting your password.</p>

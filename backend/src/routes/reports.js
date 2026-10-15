@@ -1,0 +1,213 @@
+import { Router } from 'express';
+import { supabase } from '../supabaseClient.js';
+import { requireAuth } from '../middleware/auth.js';
+import { buildInterventionsPdf } from '../utils/interventionPdf.js';
+import { validateBody, createReportSchema, exportInterventionsSchema } from '../validation/schemas.js';
+import { validateParams, uuidParamSchema } from '../middleware/validation.js';
+
+const router = Router();
+router.use(requireAuth);
+
+// ── GET /api/reports ──────────────────────────────────────────────────────────
+// Returns all reports for this user (teacher) or all school reports (admin).
+// Used by Export page and Archives page.
+router.get('/', async (req, res) => {
+  const { sortBy = 'date-new', filter = 'all' } = req.query;
+
+  let query = supabase
+    .from('reports')
+    .select(`
+      report_id,
+      report_type,
+      report_title,
+      file_path,
+      generated_at,
+      assessments (assessment_title, assessment_type, term)
+    `);
+
+  if (req.user.role === 'Teacher') {
+    query = query.eq('generated_by', req.user.userId);
+  }
+  if (filter !== 'all') {
+    query = query.eq('report_type', filter);
+  }
+
+  const ascending = sortBy === 'date-old';
+  query = query.order('generated_at', { ascending });
+
+  const { data, error } = await query;
+  if (error) return res.status(500).json({ error: error.message });
+
+  // Apply A-Z / Z-A sorting in memory (Supabase only supports column sort)
+  let result = data;
+  if (sortBy === 'a-z') result = data.sort((a, b) => a.report_title.localeCompare(b.report_title));
+  if (sortBy === 'z-a') result = data.sort((a, b) => b.report_title.localeCompare(a.report_title));
+
+  return res.json(result);
+});
+
+// ── POST /api/reports ─────────────────────────────────────────────────────────
+// Manually logs a new report (e.g. when frontend generates and exports a chart).
+// Body: { assessmentId, reportType, reportTitle, filePath? }
+router.post('/', validateBody(createReportSchema), async (req, res) => {
+  const { assessmentId, reportType, reportTitle, filePath } = req.body;
+
+  const { data, error } = await supabase
+    .from('reports')
+    .insert({
+      assessment_id: assessmentId,
+      generated_by:  req.user.userId,
+      report_type:   reportType,
+      report_title:  reportTitle,
+      file_path:     filePath ?? null,
+    })
+    .select('report_id, generated_at')
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  return res.status(201).json({ message: 'Report logged.', reportId: data.report_id, generatedAt: data.generated_at });
+});
+
+// ── POST /api/reports/export/ai-interventions ─────────────────────────────────
+// Exports a single PDF containing the AI Interventions for one or more
+// assessments chosen by the teacher. Teachers may only export assessments
+// they created; Administrators may export any assessment.
+// Body: { selections: { assessmentId, competencyId }[] } — only the chosen
+// competency entries of each assessment are included in the PDF.
+router.post('/export/ai-interventions', validateBody(exportInterventionsSchema), async (req, res) => {
+  const { selections } = req.body;
+
+  // Unique assessment ids (in selection order) + the competencies chosen for each.
+  const assessmentIds = [...new Set(selections.map((s) => s.assessmentId))];
+  const competenciesByAssessment = new Map();
+  for (const s of selections) {
+    if (!competenciesByAssessment.has(s.assessmentId)) competenciesByAssessment.set(s.assessmentId, new Set());
+    competenciesByAssessment.get(s.assessmentId).add(s.competencyId);
+  }
+
+  // 1. Fetch + verify ownership for every requested assessment up front,
+  //    so we fail fast with a normal JSON error instead of mid-PDF-stream.
+  const { data: rows, error: aErr } = await supabase
+    .from('assessments')
+    .select('assessment_id, assessment_title, assessment_type, term, total_items, created_at, created_by')
+    .in('assessment_id', assessmentIds);
+
+  if (aErr) return res.status(500).json({ error: aErr.message });
+
+  const found = new Map(rows.map((r) => [r.assessment_id, r]));
+  const missing = assessmentIds.filter((id) => !found.has(id));
+  if (missing.length) {
+    return res.status(404).json({ error: `Assessment(s) not found: ${missing.join(', ')}` });
+  }
+
+  if (req.user.role !== 'Administrator') {
+    const notOwned = rows.filter((r) => r.created_by !== req.user.userId);
+    if (notOwned.length) {
+      return res.status(403).json({ error: 'You are not allowed to export one or more of the selected assessments.' });
+    }
+  }
+
+  // Preserve the order the teacher selected them in.
+  const orderedAssessments = assessmentIds.map((id) => found.get(id));
+
+  // 2. Fetch the requesting user's display name for the report header.
+  const { data: me } = await supabase
+    .from('users')
+    .select('first_name, last_name, school_name')
+    .eq('user_id', req.user.userId)
+    .single();
+  const teacherName = me ? `${me.first_name} ${me.last_name}` : (req.user.email ?? 'Unknown');
+
+  // 3. Fetch all Accepted/Edited interventions for each assessment, then
+  //    deduplicate to the latest entry per competency. This means a teacher
+  //    who accepts interventions for two different competencies on the same
+  //    test will see both in the PDF — previously .limit(1) silently dropped
+  //    all but the most recently accepted one.
+  const assessmentsWithInterventions = [];
+  for (const assessment of orderedAssessments) {
+    const { data: interventions, error: ivErr } = await supabase
+      .from('interventions')
+      .select(`
+        intervention_id,
+        weakness_summary,
+        ai_recommendation,
+        ai_provider,
+        ai_model,
+        review_status,
+        final_recommendation,
+        created_at,
+        competency_id,
+        competencies (competency_name)
+      `)
+      .eq('assessment_id', assessment.assessment_id)
+      .in('review_status', ['Accepted', 'Edited'])
+      .order('created_at', { ascending: false });
+
+    if (ivErr) return res.status(500).json({ error: ivErr.message });
+
+    // Keep only the newest accepted/edited entry per competency so the PDF
+    // shows the teacher's current decision for each competency without
+    // including older superseded drafts.
+    const chosen = competenciesByAssessment.get(assessment.assessment_id);
+    const latestByCompetency = new Map();
+    for (const iv of (interventions ?? [])) {
+      if (!chosen.has(iv.competency_id)) continue;
+      if (!latestByCompetency.has(iv.competency_id)) {
+        latestByCompetency.set(iv.competency_id, iv);
+      }
+    }
+
+    assessmentsWithInterventions.push({
+      assessment,
+      interventions: Array.from(latestByCompetency.values()).map((iv) => ({
+        ...iv,
+        competencyName: iv.competencies?.competency_name ?? 'Unknown competency',
+      })),
+    });
+  }
+
+  // 4. Build and stream the PDF.
+  const filename = assessmentIds.length === 1
+    ? `${orderedAssessments[0].assessment_title.replace(/[^a-z0-9]+/gi, '_')}_AI_Intervention_Report.pdf`
+    : `BRIDGE_AI_Intervention_Report_${new Date().toISOString().slice(0, 10)}.pdf`;
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+  const doc = buildInterventionsPdf({
+    teacher: { name: teacherName, schoolName: me?.school_name ?? req.user.schoolName },
+    assessments: assessmentsWithInterventions,
+  });
+  doc.pipe(res);
+  doc.end();
+
+  // 5. Log one report record per exported assessment so it shows up in Archives.
+  const reportRows = orderedAssessments.map((a) => ({
+    assessment_id: a.assessment_id,
+    generated_by:  req.user.userId,
+    report_type:   'AI Recommendation',
+    report_title:  `${a.assessment_title} – AI Intervention Export`,
+  }));
+  supabase.from('reports').insert(reportRows).then(({ error }) => {
+    if (error) console.error('[reports] Failed to log AI intervention export:', error.message);
+  });
+});
+
+// ── DELETE /api/reports/:id ───────────────────────────────────────────────────
+router.delete('/:id', validateParams(uuidParamSchema('id')), async (req, res) => {
+  const { data: report, error } = await supabase
+    .from('reports')
+    .select('generated_by')
+    .eq('report_id', req.params.id)
+    .single();
+
+  if (error || !report) return res.status(404).json({ error: 'Report not found.' });
+  if (req.user.role !== 'Administrator' && report.generated_by !== req.user.userId) {
+    return res.status(403).json({ error: 'Not authorized to delete this report.' });
+  }
+
+  await supabase.from('reports').delete().eq('report_id', req.params.id);
+  return res.json({ message: 'Report deleted.' });
+});
+
+export default router;
