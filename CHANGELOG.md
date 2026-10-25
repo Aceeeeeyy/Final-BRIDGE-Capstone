@@ -1,3 +1,12 @@
+# BRIDGE — Item Analysis & Competency Trend math fixes
+
+- **Item Analysis now uses ALL students.** Right/wrong counts per question (correct + wrong = students who took the test; wrong includes blanks, with the blank count shown). The discrimination index is now the item-rest (corrected point-biserial) correlation across all students, replacing the top/bottom-27% split. Same bands (<0 Needs Review, <0.20 Needs Improvement, <0.30 Fair, <0.40 Good, else Excellent) and same 10 / 30 student reliability thresholds.
+- **Trend: `totalItems` was items x students** (e.g. 5 items x 30 students showed "150 items"). It now reports the real number of items; the old figure is `itemResponses`. Points built on fewer than 5 items are marked tentative (`enoughEvidence`).
+- **Trend, Administrator view was not limited to the admin's school.** It is now filtered by `students.school_name`.
+- Files: `grading.js`, `dashboard.js`, `Dashboard.jsx`, `grading.test.js`. Run `npm test` once (the sandbox could not run vitest; the same checks were run with plain node).
+
+---
+
 # BRIDGE — Email login code (two-step login)
 
 After the email and password are accepted, BRIDGE now emails a 6-digit code ("you are trying to log in to BRIDGE") and the user must type it before they are fully logged in. It works like the signup email verification: the code is sent and checked by Supabase Auth, so it uses the same SMTP setup already in place.

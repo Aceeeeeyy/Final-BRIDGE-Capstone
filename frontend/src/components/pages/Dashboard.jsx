@@ -213,6 +213,8 @@ const Dashboard = () => {
     q: `Q${it.questionNumber}. ${it.questionText}`,
     correct: it.totalCorrect,
     wrong: it.totalWrong,
+    blank: it.totalBlank,
+    percentWrong: it.percentWrong,
     difficultyPercentage: it.difficultyPercentage,
     difficultyLabel: it.difficultyLabel,
     discriminationIndex: it.discriminationIndex,
@@ -446,7 +448,7 @@ const Dashboard = () => {
                               </div>
                               <div className="sm:col-span-2 sm:text-center text-sm font-semibold text-[#053225] pl-5 sm:pl-0">
                                 {it.difficultyPercentage}%
-                                <div className="text-[10px] font-normal text-[#053225]/60">{it.correct} correct / {it.wrong} wrong</div>
+                                <div className="text-[10px] font-normal text-[#053225]/60">{it.correct} correct / {it.wrong} wrong{itemAnalysis?.totalStudents ? ` of ${itemAnalysis.totalStudents}` : ""}</div>
                               </div>
                               <div className="sm:col-span-2 sm:text-center text-sm font-semibold text-[#053225] pl-5 sm:pl-0">
                                 {it.discriminationIndex ?? "—"}
@@ -464,6 +466,7 @@ const Dashboard = () => {
                             {isOpen && (
                               <div className="px-3 pb-4 -mt-1 text-xs text-[#053225]/80 space-y-1">
                                 <p><span className="font-semibold">Difficulty:</span> {it.difficultyLabel} ({it.difficultyPercentage}% answered correctly)</p>
+                                <p><span className="font-semibold">Students:</span> {it.correct} got it right ({it.difficultyPercentage}%), {it.wrong} got it wrong ({it.percentWrong}%){it.blank > 0 ? `, including ${it.blank} left blank` : ""}</p>
                                 <p><span className="font-semibold">Discrimination:</span> {it.discriminationLabel}{it.discriminationIndex !== null ? ` (index: ${it.discriminationIndex}${it.discriminationReliable ? "" : ", indicative only"})` : ""}</p>
                                 {it.correctAnswer && (
                                   <p><span className="font-semibold">Correct answer:</span> {it.correctAnswer}</p>
@@ -658,7 +661,7 @@ const Dashboard = () => {
                       labelFormatter={(label, payload) => {
                         const pt = payload?.[0]?.payload;
                         return pt
-                          ? `${label} — ${pt.totalItems} items, ${pt.studentCount} student${pt.studentCount === 1 ? "" : "s"}, ${pt.assessmentCount} test${pt.assessmentCount === 1 ? "" : "s"}`
+                          ? `${label} — ${pt.totalItems} item${pt.totalItems === 1 ? "" : "s"}${pt.enoughEvidence === false ? " (few items - tentative)" : ""}, ${pt.studentCount} student${pt.studentCount === 1 ? "" : "s"}, ${pt.assessmentCount} test${pt.assessmentCount === 1 ? "" : "s"}`
                           : label;
                       }}
                     />

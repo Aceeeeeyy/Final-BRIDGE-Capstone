@@ -2,10 +2,12 @@ import { Router } from 'express';
 import { supabase } from '../supabaseClient.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { validateParams, uuidParamSchema } from '../middleware/validation.js';
+import { fetchAll } from '../utils/fetchAll.js';
 import {
   getReportedStatus,
   getGapScope,
-  rankForDiscrimination,
+  discriminationReadiness,
+  itemRestCorrelation,
   pooledPercentage,
   hasEnoughEvidence,
   MIN_ITEMS_FOR_EVIDENCE,
@@ -40,15 +42,17 @@ router.get('/trends', async (req, res) => {
   const { competencyId, studentId, schoolYear, section } = req.query;
   if (!competencyId) return res.status(400).json({ error: 'competencyId is required.' });
 
+  const buildQuery = () => {
   let query = supabase
     .from('competency_results')
     .select(`
+      result_id,
       assessment_id,
       correct_items,
       total_items,
       student_id,
       assessments!inner (term, school_year, created_by),
-      students!inner (code_name, section)
+      students!inner (code_name, section, school_name)
     `)
     .eq('competency_id', competencyId);
 
@@ -57,9 +61,16 @@ router.get('/trends', async (req, res) => {
   // see the school-wide trend for this competency.
   if (req.user.role !== 'Administrator') {
     query = query.eq('assessments.created_by', req.user.userId);
+  } else {
+    // "School-wide" must mean THIS school only, not every school in the database.
+    query = query.eq('students.school_name', req.user.schoolName);
   }
+  return query;
+  };
 
-  const { data, error } = await query;
+  // Paged read: a teacher's results across all terms easily pass the
+  // database's 1000-rows-per-request cap, which would silently cut the trend.
+  const { data, error } = await fetchAll((from, to) => buildQuery().order('result_id').range(from, to));
   if (error) return res.status(500).json({ error: error.message });
 
   const all = data ?? [];
@@ -79,16 +90,20 @@ router.get('/trends', async (req, res) => {
     const total = Number(row.total_items);
     if (!t || !(total > 0)) continue;
     const key = `${sy}|${t}`;
-    if (!groups[key]) groups[key] = { schoolYear: sy, term: t, rows: [], total: 0, students: new Set(), assessments: new Set() };
+    if (!groups[key]) groups[key] = { schoolYear: sy, term: t, rows: [], total: 0, itemsByAssessment: {}, students: new Set(), assessments: new Set() };
     groups[key].rows.push(row);
     groups[key].total += total;
+    // Items for this competency on that test (same for every student), not item x student.
+    groups[key].itemsByAssessment[row.assessment_id] = Math.max(groups[key].itemsByAssessment[row.assessment_id] || 0, total);
     groups[key].students.add(row.student_id);
     groups[key].assessments.add(row.assessment_id);
   }
 
   const trend = Object.values(groups)
     .sort((a, b) => a.schoolYear.localeCompare(b.schoolYear) || TERM_ORDER.indexOf(a.term) - TERM_ORDER.indexOf(b.term))
-    .map((g) => ({
+    .map((g) => {
+      const itemCount = Object.values(g.itemsByAssessment).reduce((a, b) => a + b, 0);
+      return {
       schoolYear: g.schoolYear,
       term: g.term,
       label: `${g.schoolYear} ${g.term}`,
@@ -96,8 +111,11 @@ router.get('/trends', async (req, res) => {
       resultCount: g.students.size,
       studentCount: g.students.size,
       assessmentCount: g.assessments.size,
-      totalItems: g.total,
-    }));
+      totalItems: itemCount,          // distinct items behind the point
+      itemResponses: g.total,         // items x students (what totalItems used to show)
+      enoughEvidence: itemCount >= MIN_ITEMS_FOR_EVIDENCE,
+    };
+    });
 
   return res.json({
     competencyId,
@@ -147,16 +165,20 @@ router.get('/admin-overview', requireRole('Administrator'), async (req, res) => 
   // Supabase .in() with an empty array errors, so short-circuit instead.
   const emptyGuard = ['00000000-0000-0000-0000-000000000000'];
 
-  const { data: scores, error: sErr } = await supabase
+  const { data: scores, error: sErr } = await fetchAll((from, to) => supabase
     .from('assessment_scores')
-    .select('assessment_id, raw_score, total_items, percentage, student_id')
-    .in('assessment_id', assessmentIds.length ? assessmentIds : emptyGuard);
+    .select('score_id, assessment_id, raw_score, total_items, percentage, student_id')
+    .in('assessment_id', assessmentIds.length ? assessmentIds : emptyGuard)
+    .order('score_id')
+    .range(from, to));
   if (sErr) return res.status(500).json({ error: sErr.message });
 
-  const { data: compResults, error: cErr } = await supabase
+  const { data: compResults, error: cErr } = await fetchAll((from, to) => supabase
     .from('competency_results')
-    .select('assessment_id, percentage, correct_items, total_items, competencies (competency_name)')
-    .in('assessment_id', assessmentIds.length ? assessmentIds : emptyGuard);
+    .select('result_id, assessment_id, percentage, correct_items, total_items, competencies (competency_name)')
+    .in('assessment_id', assessmentIds.length ? assessmentIds : emptyGuard)
+    .order('result_id')
+    .range(from, to));
   if (cErr) return res.status(500).json({ error: cErr.message });
 
   // School-wide competency breakdown. The average is item-weighted
@@ -229,14 +251,17 @@ router.get('/admin-overview', requireRole('Administrator'), async (req, res) => 
 // Per-item quality analysis, computed entirely from data BRIDGE already
 // collects (no new data entry required of the teacher):
 //   - difficulty index    = % of students who answered the item correctly
-//   - discrimination index = (top 27% overall scorers' % correct on this
-//                             item) minus (bottom 27% overall scorers' %
-//                             correct on this item). This is the classic
-//                             Kelley (1939) top/bottom-27% method. A LOW or
-//                             NEGATIVE value means students who did well
-//                             overall were not more likely to get this item
-//                             right than students who did poorly — a strong
-//                             sign the item is confusing or mis-keyed.
+//   - right / wrong counts = how many of ALL students who took the test got
+//                             this item right, and how many got it wrong
+//                             (wrong = incorrect answer + left blank).
+//                             totalCorrect + totalWrong = totalAnswered.
+//   - discrimination index = correlation between getting THIS item right and
+//                             the student's score on the OTHER items, using
+//                             ALL students (corrected point-biserial). Same
+//                             idea as before: a LOW or NEGATIVE value means
+//                             students who did well overall were not more
+//                             likely to get this item right - a strong sign
+//                             the item is confusing or mis-keyed.
 //   - top distractor       = the specific wrong option chosen most often by
 //                             students who missed the item, surfacing the
 //                             actual misconception instead of a raw
@@ -264,25 +289,26 @@ router.get('/:assessmentId/item-analysis', validateParams(uuidParamSchema('asses
     .order('question_number', { ascending: true });
   if (qErr) return res.status(500).json({ error: qErr.message });
 
-  const { data: answers, error: anErr } = await supabase
+  const { data: answers, error: anErr } = await fetchAll((from, to) => supabase
     .from('student_answers')
-    .select('student_id, question_id, student_answer, is_correct')
-    .eq('assessment_id', assessmentId);
+    .select('answer_id, student_id, question_id, student_answer, is_correct')
+    .eq('assessment_id', assessmentId)
+    .order('answer_id')
+    .range(from, to));
   if (anErr) return res.status(500).json({ error: anErr.message });
 
-  // Overall score per student — used ONLY to rank students into the
-  // top-27% / bottom-27% groups for the discrimination index.
-  const { data: scores, error: sErr } = await supabase
-    .from('assessment_scores')
-    .select('student_id, percentage')
-    .eq('assessment_id', assessmentId);
-  if (sErr) return res.status(500).json({ error: sErr.message });
-
-  // ── Rank students, carve out the top/bottom 27% groups ────────────────────
-  // Deterministic top/bottom 27% split (ties broken by student_id) with a
-  // minimum class size — see rankForDiscrimination() in utils/grading.js.
-  const { n, groupSize, canDiscriminate, reliable: discriminationReliable, topGroupIds, bottomGroupIds } =
-    rankForDiscrimination(scores);
+  // Each student's total correct, taken from the same answers being analysed,
+  // so the item counts and the discrimination index always agree.
+  const itemKey = new Map(); // `${student_id}|${question_id}` -> 1/0
+  const totalByStudent = {};
+  for (const ans of answers) {
+    const flag = ans.is_correct ? 1 : 0;
+    itemKey.set(`${ans.student_id}|${ans.question_id}`, flag);
+    totalByStudent[ans.student_id] = (totalByStudent[ans.student_id] || 0) + flag;
+  }
+  const studentIds = Object.keys(totalByStudent);
+  const n = studentIds.length;
+  const { canDiscriminate, reliable: discriminationReliable } = discriminationReadiness(n);
 
   // ── Tally every answer, grouped by question ────────────────────────────────
   const byQuestion = {};
@@ -290,8 +316,7 @@ router.get('/:assessmentId/item-analysis', validateParams(uuidParamSchema('asses
     byQuestion[q.question_id] = {
       totalAnswered: 0,
       totalCorrect: 0,
-      topCorrect: 0, topTotal: 0,
-      bottomCorrect: 0, bottomTotal: 0,
+      blank: 0,
       wrongChoices: {}, // student_answer -> count, among incorrect answers only
     };
   }
@@ -305,15 +330,8 @@ router.get('/:assessmentId/item-analysis', validateParams(uuidParamSchema('asses
       stat.totalCorrect += 1;
     } else {
       const choice = ans.student_answer && ans.student_answer.trim() !== '' ? ans.student_answer.trim() : 'No answer';
+      if (choice === 'No answer') stat.blank += 1;
       stat.wrongChoices[choice] = (stat.wrongChoices[choice] || 0) + 1;
-    }
-
-    if (topGroupIds.has(ans.student_id)) {
-      stat.topTotal += 1;
-      if (ans.is_correct) stat.topCorrect += 1;
-    } else if (bottomGroupIds.has(ans.student_id)) {
-      stat.bottomTotal += 1;
-      if (ans.is_correct) stat.bottomCorrect += 1;
     }
   }
 
@@ -325,10 +343,16 @@ router.get('/:assessmentId/item-analysis', validateParams(uuidParamSchema('asses
       : 0;
 
     let discriminationIndex = null;
-    if (canDiscriminate && stat.topTotal > 0 && stat.bottomTotal > 0) {
-      const topPct = stat.topCorrect / stat.topTotal;
-      const bottomPct = stat.bottomCorrect / stat.bottomTotal;
-      discriminationIndex = parseFloat((topPct - bottomPct).toFixed(2));
+    if (canDiscriminate) {
+      const itemScores = [], totals = [];
+      for (const sid of studentIds) {
+        const v = itemKey.get(`${sid}|${q.question_id}`);
+        if (v === undefined) continue;
+        itemScores.push(v);
+        totals.push(totalByStudent[sid]);
+      }
+      const r = itemRestCorrelation(itemScores, totals);
+      discriminationIndex = r === null ? null : parseFloat(r.toFixed(2));
     }
 
     // Difficulty: DepEd-friendly cutoffs, worded so a teacher reads the
@@ -393,6 +417,9 @@ router.get('/:assessmentId/item-analysis', validateParams(uuidParamSchema('asses
       totalAnswered: stat.totalAnswered,
       totalCorrect: stat.totalCorrect,
       totalWrong: stat.totalAnswered - stat.totalCorrect,
+      totalBlank: stat.blank,
+      percentCorrect: difficultyPercentage,
+      percentWrong: stat.totalAnswered > 0 ? parseFloat((100 - difficultyPercentage).toFixed(1)) : 0,
       difficultyPercentage,
       difficultyLabel,
       discriminationIndex,
@@ -408,13 +435,12 @@ router.get('/:assessmentId/item-analysis', validateParams(uuidParamSchema('asses
     assessmentId,
     assessmentTitle: assessment.assessment_title,
     totalStudents: n,
-    groupSize: canDiscriminate ? groupSize : 0,
     discriminationReliable,
     discriminationNote: !canDiscriminate
       ? `Discrimination is not computed yet: it needs at least ${MIN_STUDENTS_FOR_DISCRIMINATION} students with scores (${n} so far).`
       : discriminationReliable
-      ? `Discrimination compares the top ${groupSize} and bottom ${groupSize} scorers (27% of ${n} students each). Students with equal total scores are ordered consistently.`
-      : `Indicative only: with ${n} students (groups of ${groupSize}), the discrimination index shifts a lot from one student's answer. It is shown for reference but not used to flag items — about ${RELIABLE_STUDENTS_FOR_DISCRIMINATION}+ students give a dependable index.`,
+      ? `Counts and percentages use all ${n} students. Discrimination compares each item with the students' scores on the other items (all ${n} students, not just the top and bottom groups).`
+      : `Counts and percentages use all ${n} students. Discrimination is indicative only at this class size: it shifts a lot from one student's answer. It is shown for reference but not used to flag items - about ${RELIABLE_STUDENTS_FOR_DISCRIMINATION}+ students give a dependable index.`,
     items,
   });
 });
@@ -595,10 +621,12 @@ router.get('/:assessmentId', validateParams(uuidParamSchema('assessmentId')), as
   }));
 
   // ── C. Item Analysis ─────────────────────────────────────────────────────
-  const { data: answers, error: anErr } = await supabase
+  const { data: answers, error: anErr } = await fetchAll((from, to) => supabase
     .from('student_answers')
-    .select('question_id, is_correct')
-    .eq('assessment_id', assessmentId);
+    .select('answer_id, question_id, is_correct')
+    .eq('assessment_id', assessmentId)
+    .order('answer_id')
+    .range(from, to));
 
   if (anErr) return res.status(500).json({ error: anErr.message });
 

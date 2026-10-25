@@ -6,6 +6,7 @@ import { validateBody, generateInterventionSchema, reviewInterventionSchema } fr
 import { validateParams, uuidParamSchema } from '../middleware/validation.js';
 import { logAction } from '../utils/auditLog.js';
 import { getReportedStatus, getGapScope, hasEnoughEvidence, MIN_ITEMS_FOR_EVIDENCE } from '../utils/grading.js';
+import { fetchAll } from '../utils/fetchAll.js';
 
 const MASTERY_CUTOFF = 80;
 
@@ -126,11 +127,13 @@ router.post('/generate', validateBody(generateInterventionSchema), async (req, r
   const questionIds = (compQuestions ?? []).map((q) => q.question_id);
   let compAnswers = [];
   if (questionIds.length) {
-    const { data: ansData } = await supabase
+    const { data: ansData } = await fetchAll((from, to) => supabase
       .from('student_answers')
-      .select('question_id, student_answer, is_correct')
+      .select('answer_id, question_id, student_answer, is_correct')
       .eq('assessment_id', assessmentId)
-      .in('question_id', questionIds);
+      .in('question_id', questionIds)
+      .order('answer_id')
+      .range(from, to));
     compAnswers = ansData ?? [];
   }
   const itemInsights = buildItemInsights(compQuestions ?? [], compAnswers);

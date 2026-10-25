@@ -12,7 +12,8 @@ import {
   getGapScope,
   computeSchoolYear,
   pooledPercentage,
-  rankForDiscrimination,
+  discriminationReadiness,
+  itemRestCorrelation,
 } from '../grading.js';
 
 describe('getDescriptor', () => {
@@ -225,40 +226,40 @@ describe('pooledPercentage', () => {
 });
 
 // ── Discrimination grouping ───────────────────────────────────────────────────
-describe('rankForDiscrimination', () => {
-  const makeClass = (n, pctFor) =>
-    Array.from({ length: n }, (_, i) => ({ student_id: `s${String(i).padStart(3, '0')}`, percentage: pctFor(i) }));
-
-  it('gives the same groups no matter what order the rows arrive in', () => {
-    // 30 students, but only 4 distinct scores -> lots of ties
-    const scores = makeClass(30, (i) => (i % 4) * 25);
-    const a = rankForDiscrimination(scores);
-    const b = rankForDiscrimination([...scores].reverse());
-    const shuffled = [...scores].sort((x, y) => (x.student_id.charCodeAt(3) * 7) % 5 - (y.student_id.charCodeAt(3) * 7) % 5);
-    const c = rankForDiscrimination(shuffled);
-    expect([...a.topGroupIds].sort()).toEqual([...b.topGroupIds].sort());
-    expect([...a.bottomGroupIds].sort()).toEqual([...b.bottomGroupIds].sort());
-    expect([...a.topGroupIds].sort()).toEqual([...c.topGroupIds].sort());
-    expect([...a.bottomGroupIds].sort()).toEqual([...c.bottomGroupIds].sort());
+describe('discriminationReadiness', () => {
+  it('does not compute under 10 students, indicative 10-29, reliable 30+', () => {
+    expect(discriminationReadiness(5).canDiscriminate).toBe(false);
+    expect(discriminationReadiness(12)).toMatchObject({ canDiscriminate: true, reliable: false });
+    expect(discriminationReadiness(30)).toMatchObject({ canDiscriminate: true, reliable: true });
   });
+});
 
-  it('uses 27% groups and keeps them disjoint', () => {
-    const r = rankForDiscrimination(makeClass(40, (i) => i * 2));
-    expect(r.groupSize).toBe(11);
-    expect(r.topGroupIds.size).toBe(11);
-    expect(r.bottomGroupIds.size).toBe(11);
-    for (const id of r.topGroupIds) expect(r.bottomGroupIds.has(id)).toBe(false);
+describe('itemRestCorrelation (all students)', () => {
+  it('is +1 when only the strongest students get the item right', () => {
+    // totals include the item itself
+    const item = [1, 1, 1, 0, 0, 0];
+    const total = [5, 5, 4, 2, 1, 1];
+    expect(itemRestCorrelation(item, total)).toBeGreaterThan(0.9);
   });
-
-  it('does not compute an index for very small classes', () => {
-    const r = rankForDiscrimination(makeClass(5, (i) => i * 20));
-    expect(r.canDiscriminate).toBe(false);
-    expect(r.topGroupIds.size).toBe(0);
+  it('is negative when weaker students get the item right', () => {
+    const item = [0, 0, 0, 1, 1, 1];
+    const total = [5, 5, 4, 3, 2, 2];
+    expect(itemRestCorrelation(item, total)).toBeLessThan(0);
   });
-
-  it('marks 10-29 students as indicative and 30+ as reliable', () => {
-    expect(rankForDiscrimination(makeClass(12, (i) => i * 8)).canDiscriminate).toBe(true);
-    expect(rankForDiscrimination(makeClass(12, (i) => i * 8)).reliable).toBe(false);
-    expect(rankForDiscrimination(makeClass(30, (i) => i * 3)).reliable).toBe(true);
+  it('matches a hand calculation', () => {
+    // item = [1,1,0,0], rest = total - item = [3,2,2,1]
+    // mx=.5, my=2, sxy=(.5*1)+(.5*0)+(-.5*0)+(-.5*-1)=1, sxx=1, syy=2 -> 1/sqrt(2)
+    expect(itemRestCorrelation([1, 1, 0, 0], [4, 3, 2, 1])).toBeCloseTo(0.7071, 4);
+  });
+  it('is null when everyone got it right/wrong or too few students', () => {
+    expect(itemRestCorrelation([1, 1, 1, 1], [4, 3, 2, 1])).toBeNull();
+    expect(itemRestCorrelation([0, 0, 0], [1, 2, 3])).toBeNull();
+    expect(itemRestCorrelation([1], [3])).toBeNull();
+  });
+  it('does not depend on row order', () => {
+    const item = [1, 0, 1, 0, 1, 1, 0], total = [6, 2, 5, 3, 4, 7, 1];
+    const a = itemRestCorrelation(item, total);
+    const b = itemRestCorrelation([...item].reverse(), [...total].reverse());
+    expect(a).toBeCloseTo(b, 10);
   });
 });

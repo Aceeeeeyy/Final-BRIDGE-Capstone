@@ -37,8 +37,8 @@ export const MIN_ITEMS_FOR_EVIDENCE = 5;
 // otherwise it is a small-group gap (targeted support for those students).
 export const CLASS_WIDE_GAP_RATIO = 0.5;
 
-// Item-analysis reliability: the Kelley top/bottom-27% discrimination index
-// needs a reasonably large group to be stable.
+// Item-analysis reliability: the item-total (point-biserial) discrimination
+// index uses all students but is still unstable for very small classes.
 export const MIN_STUDENTS_FOR_DISCRIMINATION = 10;      // below this: not computed
 export const RELIABLE_STUDENTS_FOR_DISCRIMINATION = 30; // below this: shown as indicative only
 
@@ -198,28 +198,45 @@ export function pooledPercentage(rows) {
 }
 
 /**
- * Splits students into the top / bottom groups used by the Kelley
- * discrimination index (27% each) in a DETERMINISTIC way. Students with the
- * same score are ordered by student_id, so the groups no longer depend on the
- * row order the database returns (on short tests many students tie, which
- * previously let the same data produce different indexes).
- * @param {{student_id:string, percentage:number|string}[]} scores
+ * How much the discrimination index can be trusted for a class of n students.
+ * Uses ALL students (no top/bottom split).
+ * @returns {{n:number, canDiscriminate:boolean, reliable:boolean}}
  */
-export function rankForDiscrimination(scores) {
-  const ranked = [...scores].sort(
-    (x, y) => parseFloat(y.percentage) - parseFloat(x.percentage) || String(x.student_id).localeCompare(String(y.student_id))
-  );
-  const n = ranked.length;
-  let groupSize = Math.round(n * 0.27);
-  if (groupSize * 2 > n) groupSize = Math.floor(n / 2);
-  const canDiscriminate = groupSize >= 1 && n >= MIN_STUDENTS_FOR_DISCRIMINATION;
-  const reliable = canDiscriminate && n >= RELIABLE_STUDENTS_FOR_DISCRIMINATION;
-  return {
-    n,
-    groupSize,
-    canDiscriminate,
-    reliable,
-    topGroupIds: new Set(canDiscriminate ? ranked.slice(0, groupSize).map((r) => r.student_id) : []),
-    bottomGroupIds: new Set(canDiscriminate ? ranked.slice(n - groupSize).map((r) => r.student_id) : []),
-  };
+export function discriminationReadiness(n) {
+  const canDiscriminate = n >= MIN_STUDENTS_FOR_DISCRIMINATION;
+  return { n, canDiscriminate, reliable: canDiscriminate && n >= RELIABLE_STUDENTS_FOR_DISCRIMINATION };
+}
+
+/**
+ * Discrimination index using EVERY student's score: the corrected
+ * point-biserial (item-rest) correlation.
+ *
+ *   r = Pearson correlation between
+ *         x = 1 if the student got THIS item right, else 0
+ *         y = the student's total score on the OTHER items (total - x)
+ *
+ * The item is removed from y so it cannot "predict itself" (on a short quiz
+ * that inflates r a lot). Range is -1 to +1, read with the same bands the
+ * system already used for the old top/bottom D index. Returns null when it
+ * is undefined: fewer than 2 students, everybody right / everybody wrong on
+ * the item, or no spread in the rest scores.
+ *
+ * @param {number[]} itemScores  1/0 per student for this item
+ * @param {number[]} totalScores each student's total correct (same order)
+ * @returns {number|null}
+ */
+export function itemRestCorrelation(itemScores, totalScores) {
+  const n = itemScores.length;
+  if (n < 2 || totalScores.length !== n) return null;
+  const rest = totalScores.map((t, i) => t - itemScores[i]);
+  const mx = itemScores.reduce((a, b) => a + b, 0) / n;
+  const my = rest.reduce((a, b) => a + b, 0) / n;
+  let sxy = 0, sxx = 0, syy = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = itemScores[i] - mx;
+    const dy = rest[i] - my;
+    sxy += dx * dy; sxx += dx * dx; syy += dy * dy;
+  }
+  if (sxx === 0 || syy === 0) return null;
+  return sxy / Math.sqrt(sxx * syy);
 }
