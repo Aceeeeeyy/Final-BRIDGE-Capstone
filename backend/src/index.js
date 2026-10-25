@@ -16,6 +16,8 @@ import { generalLimiter }  from './middleware/rateLimiters.js';
 const app  = express();
 const PORT = process.env.PORT ?? 3000;
 
+app.set('trust proxy', 1);
+
 // ── Middleware ────────────────────────────────────────────────
 // helmet() sets a sane set of security-related HTTP response headers
 // (X-Content-Type-Options, X-Frame-Options, a conservative default CSP,
