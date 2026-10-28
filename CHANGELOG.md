@@ -1,3 +1,28 @@
+# BRIDGE — Schools are independent (competencies, archives, admin access)
+
+Each school's data is now separate from every other school's. An Administrator still chooses their school at signup, but can only see and change data that belongs to that school.
+
+## ⚠️ Action required (do it in this order)
+1. **Back up the Supabase database.**
+2. **Run `backend/sql/migrations/011_competencies_per_school.sql`** in the Supabase SQL editor (safe to run twice). It gives every school its own copy of the competency list and moves all existing questions, results and interventions to their own school's copy. Run it **before** the new backend code goes live: the new code expects `competencies.school_name`.
+3. Deploy / restart the backend. No new packages and no new environment variables. The frontend is unchanged.
+
+## What changed
+- **Competencies are per school.** Editing, adding or retiring one in School A no longer affects School B. Names are unique per school, ignoring case. A question can only use a competency from the teacher's own school (400 otherwise).
+- **Admins are limited to their own school** everywhere. One shared check (`canAccessOwner` in `middleware/auth.js`) now decides access: a teacher sees only their own records; an administrator sees only records of teachers in the same school (school taken from the signed login token). It fails closed. It replaces the old rule that let any administrator open any assessment.
+- **Lists scoped to the admin's school:** Archives recommendations (`GET /api/ai-intervention`), Archives PDFs (`GET /api/reports`), tests list (`GET /api/assessments`), dashboard test dropdown (`GET /api/dashboard`), audit logs.
+- **Single-record routes scoped:** dashboard, item analysis, student gaps, assessments (view/edit/publish/delete), CSV upload, AI generate/review, PDF export, report logging and deletion.
+- Files: `backend/src/middleware/auth.js`, `backend/src/routes/{aiIntervention,assessments,auditLogs,competencies,dashboard,reports,upload}.js`, `backend/sql/migrations/011_competencies_per_school.sql` (new).
+
+## Verification performed
+- 72 end-to-end checks passed against the real `schema.sql` + migrations 001-011 on PostgreSQL, behind PostgREST (the engine Supabase uses), running the real Express app, with two admins and three teachers in two schools. They cover the lists, every single-record route in both directions, same-school access still working, a real PDF export, competency independence, and the School Overview numbers.
+- Migration 011 was run on seeded data from three schools: every question, result and intervention (6 / 6 / 3) ended up pointing at its own school's competency, no PDF record was lost, and a second run changed nothing.
+- `npm test` in `backend/`: 55 passing. `npm run build` in `frontend/` succeeds.
+- **Not tested:** the live Supabase project itself. After deploying, log in as an admin of each school and check that Archives, the tests list and Manage Competencies show different data.
+- **Not changed (by decision):** anyone can still choose Administrator and any school at signup, so a new admin of a school can see that school's data.
+
+---
+
 # BRIDGE — Item Analysis & Competency Trend math fixes
 
 - **Item Analysis now uses ALL students.** Right/wrong counts per question (correct + wrong = students who took the test; wrong includes blanks, with the blank count shown). The discrimination index is now the item-rest (corrected point-biserial) correlation across all students, replacing the top/bottom-27% split. Same bands (<0 Needs Review, <0.20 Needs Improvement, <0.30 Fair, <0.40 Good, else Excellent) and same 10 / 30 student reliability thresholds.

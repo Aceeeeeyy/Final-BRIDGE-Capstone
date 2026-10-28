@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { generateWithActiveProvider } from '../services/aiProviders/index.js';
 import { supabase } from '../supabaseClient.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, canAccessOwner } from '../middleware/auth.js';
 import { validateBody, generateInterventionSchema, reviewInterventionSchema } from '../validation/schemas.js';
 import { validateParams, uuidParamSchema } from '../middleware/validation.js';
 import { logAction } from '../utils/auditLog.js';
@@ -72,7 +72,7 @@ router.post('/generate', validateBody(generateInterventionSchema), async (req, r
     .single();
 
   if (ownerErr || !ownerCheck) return res.status(404).json({ error: 'Assessment not found.' });
-  if (req.user.role !== 'Administrator' && ownerCheck.created_by !== req.user.userId) {
+  if (!(await canAccessOwner(req.user, ownerCheck.created_by))) {
     return res.status(403).json({ error: 'You are not allowed to access this assessment.' });
   }
 
@@ -304,7 +304,7 @@ router.patch('/:interventionId/review', validateParams(uuidParamSchema('interven
     .single();
 
   if (ivErr || !intervention) return res.status(404).json({ error: 'Intervention not found.' });
-  if (req.user.role !== 'Administrator' && intervention.assessments?.created_by !== req.user.userId) {
+  if (!(await canAccessOwner(req.user, intervention.assessments?.created_by))) {
     return res.status(403).json({ error: 'You are not allowed to review this intervention.' });
   }
 
@@ -400,7 +400,7 @@ router.get('/:assessmentId/competency-breakdown', validateParams(uuidParamSchema
     .single();
 
   if (aErr || !assessment) return res.status(404).json({ error: 'Assessment not found.' });
-  if (req.user.role !== 'Administrator' && assessment.created_by !== req.user.userId) {
+  if (!(await canAccessOwner(req.user, assessment.created_by))) {
     return res.status(403).json({ error: 'You are not allowed to access this assessment.' });
   }
 
@@ -519,7 +519,7 @@ router.get('/', async (req, res) => {
         assessment_type,
         term,
         created_by,
-        users (first_name, last_name)
+        users!inner (first_name, last_name, school_name)
       )
     `)
     // Archives is the record of finalized recommendations only. A teacher
@@ -531,6 +531,9 @@ router.get('/', async (req, res) => {
 
   if (req.user.role !== 'Administrator') {
     query = query.eq('assessments.created_by', req.user.userId);
+  } else {
+    // Administrators only see archives from teachers of their own school.
+    query = query.eq('assessments.users.school_name', req.user.schoolName);
   }
 
   const { data, error } = await query;
@@ -572,7 +575,7 @@ router.get('/:assessmentId', validateParams(uuidParamSchema('assessmentId')), as
     .single();
 
   if (ownerErr || !ownerCheck) return res.status(404).json({ error: 'Assessment not found.' });
-  if (req.user.role !== 'Administrator' && ownerCheck.created_by !== req.user.userId) {
+  if (!(await canAccessOwner(req.user, ownerCheck.created_by))) {
     return res.status(403).json({ error: 'You are not allowed to access this assessment.' });
   }
 

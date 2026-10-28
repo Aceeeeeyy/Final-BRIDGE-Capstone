@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { supabase } from '../supabaseClient.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, canAccessOwner, competencyInSchool } from '../middleware/auth.js';
 import {
   validateBody,
   createAssessmentSchema,
@@ -43,7 +43,7 @@ async function loadOwnedAssessment(req, res, id) {
     res.status(404).json({ error: 'Assessment not found.' });
     return null;
   }
-  if (req.user.role !== 'Administrator' && assessment.created_by !== req.user.userId) {
+  if (!(await canAccessOwner(req.user, assessment.created_by))) {
     res.status(403).json({ error: 'You do not own this assessment.' });
     return null;
   }
@@ -150,6 +150,10 @@ router.post('/:id/questions', validateParams(uuidParamSchema('id')), validateBod
 
   const { questionText, competencyId, correctAnswer, options } = req.body;
 
+  if (!(await competencyInSchool(competencyId, req.user.schoolName))) {
+    return res.status(400).json({ error: 'That competency does not belong to your school.' });
+  }
+
   // Use MAX(question_number)+1 so gaps left by deleted questions don't cause
   // a UNIQUE(assessment_id, question_number) violation. COUNT(*)+1 would
   // collide if, e.g., questions 1–5 exist, #2 is deleted (count = 4), and
@@ -191,6 +195,9 @@ router.patch('/:id/questions/:questionId', validateParams(idAndQuestionIdSchema)
   }
 
   const { questionText, competencyId, correctAnswer, options } = req.body;
+  if (competencyId !== undefined && !(await competencyInSchool(competencyId, req.user.schoolName))) {
+    return res.status(400).json({ error: 'That competency does not belong to your school.' });
+  }
   const updates = {};
   if (questionText !== undefined) updates.question_text = questionText;
   if (competencyId !== undefined) updates.competency_id = competencyId;
@@ -287,13 +294,16 @@ router.get('/', async (req, res) => {
       status,
       created_at,
       updated_at,
-      users (first_name, last_name),
+      users!inner (first_name, last_name, school_name),
       questions (count)
     `)
     .order('updated_at', { ascending: false });
 
   if (req.user.role === 'Teacher') {
     query = query.eq('created_by', req.user.userId);
+  } else {
+    // Administrators only see tests created by teachers of their own school.
+    query = query.eq('users.school_name', req.user.schoolName);
   }
 
   const { data, error } = await query;
@@ -319,7 +329,7 @@ router.get('/:id', validateParams(uuidParamSchema('id')), async (req, res) => {
     .single();
   if (aErr || !assessment) return res.status(404).json({ error: 'Assessment not found.' });
 
-  if (req.user.role !== 'Administrator' && assessment.created_by !== req.user.userId) {
+  if (!(await canAccessOwner(req.user, assessment.created_by))) {
     return res.status(403).json({ error: 'You are not allowed to view this assessment.' });
   }
 
@@ -358,7 +368,7 @@ router.delete('/:id', validateParams(uuidParamSchema('id')), async (req, res) =>
     .single();
 
   if (error || !assessment) return res.status(404).json({ error: 'Assessment not found.' });
-  if (req.user.role !== 'Administrator' && assessment.created_by !== req.user.userId) {
+  if (!(await canAccessOwner(req.user, assessment.created_by))) {
     return res.status(403).json({ error: 'You are not allowed to delete this assessment.' });
   }
 

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { supabase } from '../supabaseClient.js';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requireRole, canAccessOwner } from '../middleware/auth.js';
 import { validateParams, uuidParamSchema } from '../middleware/validation.js';
 import { fetchAll } from '../utils/fetchAll.js';
 import {
@@ -278,7 +278,7 @@ router.get('/:assessmentId/item-analysis', validateParams(uuidParamSchema('asses
     .eq('assessment_id', assessmentId)
     .single();
   if (aErr || !assessment) return res.status(404).json({ error: 'Assessment not found.' });
-  if (req.user.role !== 'Administrator' && assessment.created_by !== req.user.userId) {
+  if (!(await canAccessOwner(req.user, assessment.created_by))) {
     return res.status(403).json({ error: 'You are not allowed to view this assessment.' });
   }
 
@@ -462,7 +462,7 @@ router.get('/:assessmentId/student-gaps', validateParams(uuidParamSchema('assess
     .eq('assessment_id', assessmentId)
     .single();
   if (aErr || !assessment) return res.status(404).json({ error: 'Assessment not found.' });
-  if (req.user.role !== 'Administrator' && assessment.created_by !== req.user.userId) {
+  if (!(await canAccessOwner(req.user, assessment.created_by))) {
     return res.status(403).json({ error: 'You are not allowed to view this assessment.' });
   }
 
@@ -544,7 +544,7 @@ router.get('/:assessmentId', validateParams(uuidParamSchema('assessmentId')), as
   if (aErr || !assessment) return res.status(404).json({ error: 'Assessment not found.' });
 
   // Ownership check: only the creating teacher or an Administrator may view this dashboard.
-  if (req.user.role !== 'Administrator' && assessment.created_by !== req.user.userId) {
+  if (!(await canAccessOwner(req.user, assessment.created_by))) {
     return res.status(403).json({ error: 'You are not allowed to view this assessment.' });
   }
 
@@ -714,15 +714,20 @@ router.get('/', async (req, res) => {
   // published-but-not-yet-scored tests have nothing to chart yet.
   let query = supabase
     .from('assessments')
-    .select('assessment_id, assessment_title, assessment_type, term, total_items, created_at')
+    .select('assessment_id, assessment_title, assessment_type, term, total_items, created_at, users!inner (school_name)')
     .eq('status', 'Completed')
     .order('created_at', { ascending: false });
 
-  if (req.user.role === 'Teacher') query = query.eq('created_by', req.user.userId);
+  if (req.user.role === 'Teacher') {
+    query = query.eq('created_by', req.user.userId);
+  } else {
+    // Administrators only see tests created by teachers of their own school.
+    query = query.eq('users.school_name', req.user.schoolName);
+  }
 
   const { data, error } = await query;
   if (error) return res.status(500).json({ error: error.message });
-  return res.json(data);
+  return res.json((data ?? []).map(({ users, ...assessment }) => assessment));
 });
 
 export default router;

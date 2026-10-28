@@ -2,7 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { parse } from 'csv-parse/sync';
 import { supabase } from '../supabaseClient.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, canAccessOwner } from '../middleware/auth.js';
 import { getDescriptor, getMasteryStatus, parseZipGradeRow, detectZipGradeItemCount, extractZipGradeKey, answersMatch } from '../utils/grading.js';
 import { uploadLimiter } from '../middleware/rateLimiters.js';
 import { validateParams, uuidParamSchema } from '../middleware/validation.js';
@@ -42,7 +42,7 @@ router.post('/csv/:assessmentId', uploadLimiter, validateParams(uuidParamSchema(
     .single();
 
   if (aErr || !assessment) return res.status(404).json({ error: 'Assessment not found.' });
-  if (req.user.role !== 'Administrator' && assessment.created_by !== req.user.userId) {
+  if (!(await canAccessOwner(req.user, assessment.created_by))) {
     return res.status(403).json({ error: 'You do not own this assessment.' });
   }
   if (assessment.status === 'Draft') {

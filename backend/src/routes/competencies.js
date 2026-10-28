@@ -8,6 +8,9 @@ import { logAction } from '../utils/auditLog.js';
 const router = Router();
 router.use(requireAuth);
 
+// Every competency belongs to ONE school (competencies.school_name). Schools are
+// independent: users only ever see and change their own school's list, and the
+// school always comes from the signed JWT, never from the request body.
 // ── GET /api/competencies ─────────────────────────────────────────────────────
 // Returns active competencies used to populate the QuestionBuilder and AI
 // Intervention selectors. The study itself scopes BRIDGE to two MATATAG
@@ -21,6 +24,7 @@ router.get('/', async (req, res) => {
   let query = supabase
     .from('competencies')
     .select('competency_id, competency_name, description, is_active, created_at')
+    .eq('school_name', req.user.schoolName)
     .order('competency_name', { ascending: true });
 
   const includeInactive = req.query.includeInactive === 'true' && req.user.role === 'Administrator';
@@ -39,7 +43,7 @@ router.post('/', requireRole('Administrator'), validateBody(createCompetencySche
 
   const { data, error } = await supabase
     .from('competencies')
-    .insert({ competency_name: competencyName, description: description || null, created_by: req.user.userId })
+    .insert({ competency_name: competencyName, description: description || null, created_by: req.user.userId, school_name: req.user.schoolName })
     .select('competency_id, competency_name, description, is_active, created_at')
     .single();
 
@@ -72,8 +76,9 @@ router.patch('/:id', requireRole('Administrator'), validateParams(uuidParamSchem
     .from('competencies')
     .update(updates)
     .eq('competency_id', req.params.id)
+    .eq('school_name', req.user.schoolName)
     .select('competency_id, competency_name, description, is_active, created_at')
-    .single();
+    .maybeSingle();
 
   if (error) {
     if (error.code === '23505') return res.status(409).json({ error: 'A competency with this name already exists.' });
@@ -96,8 +101,9 @@ router.delete('/:id', requireRole('Administrator'), validateParams(uuidParamSche
     .from('competencies')
     .update({ is_active: false })
     .eq('competency_id', req.params.id)
+    .eq('school_name', req.user.schoolName)
     .select('competency_id')
-    .single();
+    .maybeSingle();
 
   if (error) return res.status(500).json({ error: error.message });
   if (!data) return res.status(404).json({ error: 'Competency not found.' });

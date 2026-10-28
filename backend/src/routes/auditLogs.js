@@ -24,10 +24,13 @@ router.get('/', async (req, res) => {
       metadata,
       ip_address,
       created_at,
-      users (first_name, last_name, email, role)
+      users!inner (first_name, last_name, email, role, school_name)
     `)
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
+
+  // Only this school's activity (the admin's school comes from the JWT).
+  query = query.eq('users.school_name', req.user.schoolName);
 
   if (req.query.action) query = query.eq('action', req.query.action);
 
