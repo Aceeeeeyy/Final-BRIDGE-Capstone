@@ -25,13 +25,13 @@ import { listDashboardAssessments, getDashboard, getCompetencies, getCompetencyT
 // see the status criteria documented alongside the flag logic in
 // backend/src/routes/dashboard.js.
 const FLAG_STYLES = {
-  "Needs Review":      { bg: "#e6182e24", text: "#d0102a" },
-  "Needs Improvement": { bg: "#ffb80050", text: "#a85500" },
-  "Challenging":       { bg: "#ffb80050", text: "#a85500" },
-  "Very Easy":         { bg: "#ffb80050", text: "#a85500" },
-  "Strong Item":       { bg: "#12b76a28", text: "#067647" },
-  "Performing Well":   { bg: "#12b76a28", text: "#067647" },
-  "Limited Data":      { bg: "#64748b30", text: "#475f7e" },
+  "Needs Review":            { bg: "#cc293620", text: "#cc2936" },
+  "Needs Improvement":       { bg: "#ffb80030", text: "#8a5b00" },
+  "Challenging":             { bg: "#ffb80030", text: "#8a5b00" },
+  "Very Easy":               { bg: "#ffb80030", text: "#8a5b00" },
+  "Strong Item":             { bg: "#05322520", text: "#053225" },
+  "Performing Well":         { bg: "#05322520", text: "#053225" },
+  "Limited Data":            { bg: "#64748b20", text: "#475569" },
 };
 
 // Cell colours for the per-student competency table.
@@ -206,6 +206,7 @@ const Dashboard = () => {
   const gradeData = (dashboard?.gradeDescriptorChart || []).map((g) => ({
     name: g.name,
     value: g.percentage,
+    count: g.count ?? 0,
     color: DESCRIPTOR_COLORS[g.name] || "#6e9277",
   }));
 
@@ -388,7 +389,7 @@ const Dashboard = () => {
                             <Cell key={idx} fill={entry.color} stroke="none" />
                           ))}
                         </Pie>
-                        <Tooltip formatter={(v) => `${v}%`} />
+                        <Tooltip formatter={(v, _n, item) => [`${v}% (${item?.payload?.count ?? 0} ${item?.payload?.count === 1 ? "student" : "students"})`, item?.payload?.name]} />
                       </PieChart>
                     </ResponsiveContainer>
                   </div>
@@ -397,7 +398,7 @@ const Dashboard = () => {
                       {gradeData.map((g, i) => (
                         <div key={i} className="flex items-start gap-3 min-w-0">
                           <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: g.color }} />
-                          <span className="break-words text-sm leading-5">{g.name} ({g.value}%)</span>
+                          <span className="break-words text-sm leading-5">{g.name} ({g.value}%) &ndash; {g.count} {g.count === 1 ? "student" : "students"}</span>
                         </div>
                       ))}
                     </div>
